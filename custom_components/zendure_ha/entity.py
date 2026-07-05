@@ -236,19 +236,27 @@ class EntityDevice:
         # check al entities
         for key, entries in ed.items():
             entityid = f"{entries[0].domain}.{name}_{key}"
-            if len(entries) == 1 and entries[0].entity_id == entityid:
+            new_uid = f"{name}_{key}"
+            if len(entries) == 1 and entries[0].entity_id == entityid and entries[0].unique_id == new_uid:
                 continue
             _LOGGER.info("Update entity %s", entityid)
-            if (found := next((x for x in entries if x.entity_id == entityid), entries[0])) is not None:
-                entries.remove(found)
-                if found.entity_id != entityid:
-                    _LOGGER.info("Updating entity %s -> %s", found.entity_id, entityid)
-                    entity_registry.async_update_entity(found.entity_id, new_entity_id=entityid)
-
-            # remove all other entities with same translation_key but different entity_id
+            # Prefer the entry whose unique_id already matches what create_entities is about to
+            # produce (that is the entry HA will bind the live entity to). Fall back to the entry
+            # holding the canonical entity_id, then to any entry.
+            found = (
+                next((x for x in entries if x.unique_id == new_uid), None)
+                or next((x for x in entries if x.entity_id == entityid), None)
+                or entries[0]
+            )
+            entries.remove(found)
+            # Remove the losers FIRST so their entity_id and (indirectly) any conflicting unique_id
+            # slots are freed before we migrate the survivor.
             for entry in entries:
-                _LOGGER.info("Removing entity %s", entry.entity_id)
+                _LOGGER.info("Removing stale entity %s", entry.entity_id)
                 entity_registry.async_remove(entry.entity_id)
+            if found.entity_id != entityid or found.unique_id != new_uid:
+                _LOGGER.info("Migrating entity %s -> %s (unique_id %s -> %s)", found.entity_id, entityid, found.unique_id, new_uid)
+                entity_registry.async_update_entity(found.entity_id, new_entity_id=entityid, new_unique_id=new_uid)
 
     async def dataRefresh(self, _update_count: int) -> None:
         return
