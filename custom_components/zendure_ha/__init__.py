@@ -8,6 +8,9 @@ from homeassistant.helpers import device_registry as dr
 
 from .api import Api
 from .const import (
+    CONF_DEVICE_IP,
+    CONF_DEVICE_MODEL,
+    CONF_DEVICE_NAME,
     CONF_DEVICE_SN,
     CONF_DEVICES,
     CONF_LOCAL_ONLY,
@@ -34,8 +37,31 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ZendureConfigEntry) ->
     return True
 
 
+def _normalize_local_devices(hass: HomeAssistant, entry: ZendureConfigEntry) -> None:
+    """Fold a legacy single-device local entry into the CONF_DEVICES list."""
+    # Local (cloud-free) setup briefly stored one device as flat keys before
+    # multi-device support existed. Convert those entries in place and drop the
+    # flat keys, so a later empty CONF_DEVICES (all devices removed) cannot fall
+    # back to them and resurrect a device. Gate on the key being absent, not on an
+    # empty list - an empty list is authoritative and means "no devices". This is
+    # idempotent and not tied to the config-entry version.
+    data = entry.data
+    if not (data.get(CONF_LOCAL_ONLY) and CONF_DEVICES not in data and data.get(CONF_DEVICE_IP)):
+        return
+    device = {
+        CONF_DEVICE_IP: data.get(CONF_DEVICE_IP, ""),
+        CONF_DEVICE_SN: data.get(CONF_DEVICE_SN, ""),
+        CONF_DEVICE_MODEL: data.get(CONF_DEVICE_MODEL, ""),
+        CONF_DEVICE_NAME: data.get(CONF_DEVICE_NAME, ""),
+    }
+    new_data = {k: v for k, v in data.items() if k not in (CONF_DEVICE_IP, CONF_DEVICE_SN, CONF_DEVICE_MODEL, CONF_DEVICE_NAME)}
+    new_data[CONF_DEVICES] = [device]
+    hass.config_entries.async_update_entry(entry, data=new_data)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> bool:
     """Set up Zendure as config entry."""
+    _normalize_local_devices(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await EntityDevice.async_load_translations(hass)
     manager = ZendureManager(hass, entry)
