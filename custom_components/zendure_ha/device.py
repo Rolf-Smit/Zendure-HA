@@ -739,7 +739,14 @@ class ZendureZenSdk(ZendureDevice):
         """Initialize Device."""
         self.session = async_get_clientsession(hass, verify_ssl=False)
         super().__init__(hass, deviceId, name, model, definition, parent)
-        self.connection = ZendureRestoreSelect(self, "connection", {0: "cloud", 2: "zenSDK"}, self.mqttSelect, 0)
+        # A local (cloud-free) device has no cloud broker to fall back to: dataRefresh,
+        # power_get and doCommand all skip HTTP polling/writes once connection.value == 0,
+        # so picking "cloud" here would silently stop updates and drop every command. Only
+        # offer zenSDK for it, instead of just defaulting to zenSDK and leaving the option.
+        if definition.get("local"):
+            self.connection = ZendureRestoreSelect(self, "connection", {2: "zenSDK"}, self.mqttSelect, 2)
+        else:
+            self.connection = ZendureRestoreSelect(self, "connection", {0: "cloud", 2: "zenSDK"}, self.mqttSelect, 0)
         self.httpid = 0
 
     async def mqttSelect(self, select: Any, _value: Any) -> None:
