@@ -64,7 +64,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.zero_next = datetime.min
         self.zero_fast = datetime.min
         self.check_reset = datetime.min
+        self.p1meter: str | None = None
         self.p1meterEvent: Callable[[], None] | None = None
+        self.distribute_lock = asyncio.Lock()
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
         self.p1_factor = 1
         self.update_count = 0
@@ -106,7 +108,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"}, self.update_operation),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
-        self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
+        self.manualpower = ZendureRestoreNumber(self, "manual_power", self.update_manualpower, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
@@ -272,6 +274,23 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     if len(self.devices) > 0:
                         for d in self.devices:
                             await d.power_off()
+                case _:
+                    await self.distribute_now()
+
+    async def update_manualpower(self, _entity: ZendureRestoreNumber, _value: Any) -> None:
+        if self.operation == ManagerMode.MANUAL:
+            await self.distribute_now()
+
+    async def distribute_now(self) -> None:
+        """Distribute the power using the last P1 reading, instead of waiting for the next one."""
+        if self.p1meter is None or (state := self.hass.states.get(self.p1meter)) is None:
+            return
+        try:
+            p1 = int(self.p1_factor * float(state.state))
+        except ValueError:
+            return
+        if any(d.online for d in self.devices):
+            await self.distribute(p1, True, datetime.now())
 
     async def _async_update_data(self) -> None:
 
@@ -315,6 +334,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.debug("Updating P1 meter to: %s", p1meter)
         if self.p1meterEvent:
             self.p1meterEvent()
+        self.p1meter = p1meter or None
         if p1meter:
             self.p1meterEvent = async_track_state_change_event(self.hass, [p1meter], self._p1_changed)
             if (entity := self.hass.states.get(p1meter)) is not None and entity.attributes.get("unit_of_measurement", "W") in ("kW", "kilowatt", "kilowatts"):
@@ -396,6 +416,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # check minimal time between updates
         if isFast or time > self.zero_next:
+            await self.distribute(p1, isFast, time)
+
+    async def distribute(self, p1: int, isFast: bool, time: datetime) -> None:
+        async with self.distribute_lock:
             try:
                 # prevent updates during power distribution changes
                 self.zero_fast = datetime.max
